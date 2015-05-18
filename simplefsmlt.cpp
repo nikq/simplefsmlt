@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <stack>
+#include <time.h>
 
 const double PI = 3.14159265358979323846;
 const double INF = 1e20;
@@ -642,7 +643,7 @@ PathSample generate_new_path(const Ray &camera, const Vec &cx, const Vec &cy, co
   const double r2 = 2.0 * mlt.NextSample(), dy = r2 < 1.0 ? sqrt(r2) - 1.0 : 1.0 - sqrt(2.0 - r2);
   Vec dir = cx * (((sx + 0.5 + dx) / 2.0 + x) / width - 0.5) + cy * (((sy + 0.5 + dy) / 2.0 + y) / height- 0.5) + camera.dir;
   const Ray ray = Ray(camera.org + dir * 130.0, Normalize(dir));
-  double F = radiance(ray, 0, wavelength, mlt);
+  double F = radiance(ray, 0, wavelength, mlt) / div;
   //printf("%d,%d,%f : %f\n",x,y,wavelength,F);
   return PathSample(x, y, wavelength, F, 1.0 / (1.0 / weight));
 }
@@ -650,7 +651,7 @@ PathSample generate_new_path(const Ray &camera, const Vec &cx, const Vec &cy, co
 
 // MLTする
 // 画像平面上で大域的に変異させる
-void render_mlt(Color *image, const Ray &camera, const Vec &cx, const Vec &cy, const int width, const int height) {
+void render_mlt(int M,Color *image, const Ray &camera, const Vec &cx, const Vec &cy, const int width, const int height) {
   std::vector<Color> tmp_image;
   tmp_image.resize(width * height);
 
@@ -696,20 +697,11 @@ void render_mlt(Color *image, const Ray &camera, const Vec &cx, const Vec &cy, c
   int accept = 0, reject = 0;
   PathSample old_path = seed_paths[selecetd_path];
   int progress = 0;
-  int i = 0;
-  while(1){
-    
-    i++;
-    
-    if ( i % 65535 == 0 ) {
+  for(int i=0;i<M;i++){
+
+    if ( i % 0xFFFF == 0xFFFF ) {
       //progress += 10;
-      std::cout << i << "mutations : " ;
       std::cout << "Accept: " << accept << " Reject: " << reject << " Rate: " << (100.0 * accept / (accept + reject)) << "%" << std::endl;
-      for(int k = 0; k < width * height; k ++)
-        image[k] = tmp_image[k];
-      char buf[256];
-      sprintf(buf, "%08d.hdr", i);
-      save_hdr_file(buf, image, width, height);
     }
 
     // この辺も全部論文と同じ（Next()）
@@ -718,9 +710,9 @@ void render_mlt(Color *image, const Ray &camera, const Vec &cx, const Vec &cy, c
     PathSample new_path = generate_new_path(camera, cx, cy, width, height, mlt, -1, -1);
 
     double a = std::min(1.0, luminance(new_path) / luminance(old_path));
-    const double new_path_weight = (a + mlt.large_step) / (luminance(new_path) / b + p_large);
-    const double old_path_weight = (1.0 - a) / (luminance(old_path) / b + p_large);
-    
+    const double new_path_weight = (a + mlt.large_step) / (luminance(new_path) / b + p_large) / M;
+    const double old_path_weight = (1.0 - a) / (luminance(old_path) / b + p_large) / M;
+
     tmp_image[new_path.y * width + new_path.x] = tmp_image[new_path.y * width + new_path.x] + new_path.weight * new_path_weight * path2rgb(new_path);
     tmp_image[old_path.y * width + old_path.x] = tmp_image[old_path.y * width + old_path.x] + old_path.weight * old_path_weight * path2rgb(old_path);
 
@@ -741,12 +733,14 @@ void render_mlt(Color *image, const Ray &camera, const Vec &cx, const Vec &cy, c
       }
     }
   }
+  for(int i=0;i<width*height;i++)
+    image[i] = image[i] + tmp_image[i];
 }
 
 
 int main(int argc, char **argv) {
-  int width  = 1024;
-  int height = 1024;
+  int width  = 512;
+  int height = 512;
 
   // カメラ位置
   Ray camera(Vec(50.0, 52.0, 295.6), Normalize(Vec(0.0, -0.042612, -1.0)));
@@ -773,5 +767,10 @@ int main(int argc, char **argv) {
     cdf[i] /= total;
     pdf[i] /= total;
   }
-  render_mlt(image,camera,cx,cy,width,height);
+  while(1){
+    render_mlt(655350,image,camera,cx,cy,width,height);
+    char buf[256];
+    sprintf(buf, "%08d.hdr", time(NULL));
+    save_hdr_file(buf, image, width, height);
+  }
 }
