@@ -11,6 +11,8 @@
 #include <vector>
 #include <stack>
 #include <time.h>
+#include <array>
+#include <omp.h>
 
 const double PI = 3.14159265358979323846;
 const double INF = 1e20;
@@ -24,18 +26,31 @@ inline int toInt(double x){ return int(pow(clamp(x),1/2.2)*255+.5); }
 
 // Xorshift
 // from Wikipedia
-unsigned int xor128(void) {
-  static unsigned int x = 123456789;
-  static unsigned int y = 362436069;
-  static unsigned int z = 521288629;
-  static unsigned int w = 88675123;
-  unsigned int t;
+class xor128{
+public:
+  unsigned int x,y,z,w;
+  xor128(){
+    x = 123456789;
+    y = 362436069;
+    z = 521288629;
+    w = 88675123;
+  }
+  inline unsigned int step(void) {
+    unsigned int t;
+    t = x ^ (x << 11);
+    x = y; y = z; z = w;
+    return w = (w ^ (w >> 19)) ^ (t ^ (t >> 8));
+  }
+  void setSeed( unsigned u ){
+    x ^= u;
+  }
+  inline double rand01() { return (double)step()/(UINT_MAX); }
+};
 
-  t = x ^ (x << 11);
-  x = y; y = z; z = w;
-  return w = (w ^ (w >> 19)) ^ (t ^ (t >> 8));
+std::vector<xor128> random_xor128;
+inline double rand01( int index = 0 ) {
+  return random_xor128[ omp_get_thread_num() ].rand01();
 }
-inline double rand01() { return (double)xor128()/(UINT_MAX); }
 
 
 // *** データ構造 ***
@@ -69,6 +84,20 @@ static const Color BackgroundColor(0.0, 0.0, 0.0);
 // スペクトル
 typedef double Spectrum;
 static const Spectrum BackgroundSpectrum = 0.0;
+inline double BlackBody(
+  const double &T,        // temperature (Kelvin)
+  const double &lambda)   // wavelength (meter)
+{
+  static const double h = 6.62606896e-34;   // Plank constant
+  static const double c = 2.99792458e+8;    // Speed of light
+  static const double k = 1.38064880e-23;   // Boltzmann constant
+  const double pl   = h * c / ( 4.97 * k * T );
+  const double arg1 = 2 * PI * h * c * c;
+  const double arg2 = ( h * c ) / k;
+  double value = (arg1 * pow(lambda, -5.0)) / (exp(arg2 / (lambda * T)) - 1.0);
+  double peak  = (arg1 * pow(pl    , -5.0)) / (exp(arg2 / (pl     * T)) - 1.0);
+  return value / peak;
+}
 
 struct Ray {
   Vec org, dir;
@@ -116,8 +145,9 @@ Sphere spheres[] = {
 const int LightID = 0;
 
 inline Spectrum light_intensity(const double wavelength) {
-  return (120.0 / 95.0);
-//  return (12.0/95.0) * (exp(-pow(wavelength - 600, 2)/10000) * 450 + 150) / 650.0;
+  // return (120.0 / 95.0);
+  //  return (12.0/95.0) * (exp(-pow(wavelength - 600, 2)/10000) * 450 + 150) / 650.0;
+  return BlackBody( 4500., wavelength / 1e5 );
 }
 
 
@@ -651,7 +681,7 @@ PathSample generate_new_path(const Ray &camera, const Vec &cx, const Vec &cy, co
 
 // MLTする
 // 画像平面上で大域的に変異させる
-void render_mlt(int M,Color *image, const Ray &camera, const Vec &cx, const Vec &cy, const int width, const int height) {
+void render_mlt( int M,Color *image, const Ray &camera, const Vec &cx, const Vec &cy, const int width, const int height) {
   std::vector<Color> tmp_image;
   tmp_image.resize(width * height);
 
@@ -693,15 +723,15 @@ void render_mlt(int M,Color *image, const Ray &camera, const Vec &cx, const Vec 
   
   // 論文参照
   const double b = sumI / SeedPathMax;
-  const double p_large = 0.5;
+  const double p_large = 0.1;
   int accept = 0, reject = 0;
   PathSample old_path = seed_paths[selecetd_path];
   int progress = 0;
   for(int i=0;i<M;i++){
 
-    if ( i % 0xFFFF == 0xFFFF ) {
+    if ( i % 0xFFFF == 1 ) {
       //progress += 10;
-      std::cout << "Accept: " << accept << " Reject: " << reject << " Rate: " << (100.0 * accept / (accept + reject)) << "%" << std::endl;
+      std::cout << "thread " << omp_get_thread_num() << " Accept: " << accept << " Reject: " << reject << " Rate: " << (100.0 * accept / (accept + reject)) << "%" << std::endl;
     }
 
     // この辺も全部論文と同じ（Next()）
@@ -710,9 +740,8 @@ void render_mlt(int M,Color *image, const Ray &camera, const Vec &cx, const Vec 
     PathSample new_path = generate_new_path(camera, cx, cy, width, height, mlt, -1, -1);
 
     double a = std::min(1.0, luminance(new_path) / luminance(old_path));
-    const double new_path_weight = (a + mlt.large_step) / (luminance(new_path) / b + p_large) / M;
-    const double old_path_weight = (1.0 - a) / (luminance(old_path) / b + p_large) / M;
-
+    double new_path_weight = (a + mlt.large_step) / (luminance(new_path) / b + p_large) / M;
+    double old_path_weight = (1.0 - a) / (luminance(old_path) / b + p_large) / M;
     tmp_image[new_path.y * width + new_path.x] = tmp_image[new_path.y * width + new_path.x] + new_path.weight * new_path_weight * path2rgb(new_path);
     tmp_image[old_path.y * width + old_path.x] = tmp_image[old_path.y * width + old_path.x] + old_path.weight * old_path_weight * path2rgb(old_path);
 
@@ -733,20 +762,25 @@ void render_mlt(int M,Color *image, const Ray &camera, const Vec &cx, const Vec 
       }
     }
   }
+  omp_lock_t lock;
+  omp_init_lock(&lock);
+  omp_set_lock(&lock);
   for(int i=0;i<width*height;i++)
     image[i] = image[i] + tmp_image[i];
+  omp_unset_lock(&lock);
 }
 
 
 int main(int argc, char **argv) {
-  int width  = 512;
-  int height = 512;
+  int width  = 1024;
+  int height = 1024;
 
   // カメラ位置
   Ray camera(Vec(50.0, 52.0, 295.6), Normalize(Vec(0.0, -0.042612, -1.0)));
   // シーン内でのスクリーンのx,y方向のベクトル
   Vec cx = Vec(width * 0.5135 / height);
   Vec cy = Normalize(Cross(cx, camera.dir)) * 0.5135;
+  Color *accum = new Color[width * height];
   Color *image = new Color[width * height];
 
   // 下で各波長についてパストレーシングするわけだが、波長の選択を完全にランダムにするのは効率が悪い。
@@ -754,6 +788,7 @@ int main(int argc, char **argv) {
   // 具体的には各波長について、XYZ応答のうちY、すなわち輝度分に比例する確率密度関数を作り、それに基づいてサンプリングするようにする。
   // pdfはその密度関数でcdfはそこからサンプリングするための累積分布関数
   double total = 0.0;
+  double div   = 0.;
   
   for (int i = 0; i < wl_max; i ++)
     luminance_table[i] = wavelength2xyz_table[i * 3 + 1];
@@ -767,8 +802,23 @@ int main(int argc, char **argv) {
     cdf[i] /= total;
     pdf[i] /= total;
   }
+
+  int num_parallel = omp_get_max_threads();
+  printf("render in %d parallel\n",num_parallel);
+  random_xor128.resize( num_parallel );
+  for(int i=0;i<random_xor128.size();i++)
+    random_xor128[i].setSeed( time(NULL) + i );
+  
   while(1){
-    render_mlt(655350,image,camera,cx,cy,width,height);
+
+#pragma omp parallel for
+    for(int i=0;i<num_parallel;i++)
+      render_mlt(0xFFFFF,accum,camera,cx,cy,width,height);
+
+    div += 1.;
+    for(int i=0;i<width*height;i++)
+      image[i] = accum[i] / div;
+    
     char buf[256];
     sprintf(buf, "%08d.hdr", time(NULL));
     save_hdr_file(buf, image, width, height);
